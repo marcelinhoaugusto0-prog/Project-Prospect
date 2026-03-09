@@ -1,0 +1,35 @@
+# Common
+node_modules/
+dist/
+.vscode/
+.idea/
+.DS_Store
+
+# Python
+backend/venv/
+backend/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+api_output.txt
+api_response.json
+debug_maps.png
+debug_maps.html
+*.png
+*.html
+
+# Project specific
+frontend/node_modules/
+frontend/dist/
+backend/test_api.py
+test_frontend.py
+frontend_form_test.png
+frontend_result_test.png
+frontend_result.png
+frontend_limit_test.png
