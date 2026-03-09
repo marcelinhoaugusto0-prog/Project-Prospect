@@ -3,7 +3,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 import requests
-import os
 import traceback
 
 app = FastAPI(title="Prospects API")
@@ -16,9 +15,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Google Places API Key - set as environment variable in Vercel
-GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY", "")
-
 
 class SearchParams(BaseModel):
     segment: str
@@ -28,113 +24,29 @@ class SearchParams(BaseModel):
 
 def scrape_prospects(segment: str, location: str, radius: int):
     """
-    Fetches business prospects using Google Places API (Text Search).
-    Returns structured business data with name, phone, and address.
+    Fetches business prospects using free OpenStreetMap APIs:
+    1. Nominatim for geocoding the location
+    2. Overpass API for finding businesses nearby
+    100% free, no API key required.
     """
-    search_query = f"{segment} em {location}"
-    print(f"Buscando por: {search_query} (Raio: {radius}km)")
+    print(f"Buscando por: {segment} em {location} (Raio: {radius}km)")
 
-    if not GOOGLE_API_KEY:
-        raise ValueError(
-            "GOOGLE_API_KEY não configurada. "
-            "Configure a variável de ambiente no Vercel Dashboard."
-        )
+    # Step 1: Geocode the location using Nominatim
+    lat, lon = geocode_location(location)
+    if lat is None or lon is None:
+        raise ValueError(f"Não foi possível encontrar a localização: {location}")
 
-    results = []
+    print(f"Coordenadas encontradas: {lat}, {lon}")
 
-    try:
-        # Step 1: Use Text Search to find businesses
-        text_search_url = "https://places.googleapis.com/v1/places:searchText"
+    # Step 2: Map the segment to OSM tags
+    osm_tags = map_segment_to_osm_tags(segment)
+    print(f"Tags OSM: {osm_tags}")
 
-        headers = {
-            "Content-Type": "application/json",
-            "X-Goog-Api-Key": GOOGLE_API_KEY,
-            "X-Goog-FieldMask": (
-                "places.displayName,"
-                "places.formattedAddress,"
-                "places.nationalPhoneNumber,"
-                "places.internationalPhoneNumber,"
-                "places.websiteUri,"
-                "places.id"
-            ),
-        }
+    # Step 3: Query Overpass API for businesses
+    radius_meters = radius * 1000  # Convert km to meters
+    results = query_overpass(lat, lon, radius_meters, osm_tags, segment)
 
-        payload = {
-            "textQuery": search_query,
-            "languageCode": "pt-BR",
-            "maxResultCount": 20,
-        }
-
-        # If radius is specified, we can add location bias
-        # but for text search, the location is already in the query
-        if radius and radius > 0:
-            payload["maxResultCount"] = min(20, 20)  # API max is 20 per request
-
-        response = requests.post(text_search_url, json=payload, headers=headers, timeout=30)
-
-        if response.status_code != 200:
-            error_detail = response.text
-            print(f"Google Places API Error ({response.status_code}): {error_detail}")
-            raise Exception(f"Google Places API retornou erro {response.status_code}: {error_detail}")
-
-        data = response.json()
-        places = data.get("places", [])
-
-        print(f"Google Places retornou {len(places)} resultados.")
-
-        # If we need more results, paginate
-        all_places = list(places)
-
-        # For getting more results, we can make additional requests with page tokens
-        # The new API supports pagination via nextPageToken
-        # Let's make up to 5 requests to get ~100 results
-        page_count = 1
-        max_pages = 5  # 5 pages * 20 = up to 100 results
-
-        while page_count < max_pages and len(all_places) < 100:
-            # For the new Places API, we use pageToken
-            next_page_token = data.get("nextPageToken")
-            if not next_page_token:
-                break
-
-            payload["pageToken"] = next_page_token
-            response = requests.post(text_search_url, json=payload, headers=headers, timeout=30)
-
-            if response.status_code != 200:
-                break
-
-            data = response.json()
-            new_places = data.get("places", [])
-            if not new_places:
-                break
-
-            all_places.extend(new_places)
-            page_count += 1
-            print(f"Página {page_count}: +{len(new_places)} resultados (total: {len(all_places)})")
-
-        # Step 2: Format results
-        for i, place in enumerate(all_places):
-            display_name = place.get("displayName", {})
-            name = display_name.get("text", "Sem nome") if isinstance(display_name, dict) else str(display_name)
-
-            phone = place.get("nationalPhoneNumber", "") or place.get("internationalPhoneNumber", "")
-            address = place.get("formattedAddress", location)
-
-            results.append({
-                "id": i + 1,
-                "companyName": name,
-                "phone": phone,
-                "address": address,
-            })
-
-    except ValueError:
-        raise  # Re-raise API key errors
-    except Exception as e:
-        print(f"Erro durante a busca: {e}")
-        traceback.print_exc()
-        raise
-
-    # Deduplicate based on company name
+    # Deduplicate
     unique_results = []
     seen = set()
     for row in results:
@@ -143,8 +55,192 @@ def scrape_prospects(segment: str, location: str, radius: int):
             seen.add(name_lower)
             unique_results.append(row)
 
-    print(f"Busca finalizada. {len(unique_results)} resultados únicos encontrados.")
+    print(f"Busca finalizada. {len(unique_results)} resultados únicos.")
     return unique_results
+
+
+def geocode_location(location: str):
+    """Use Nominatim (free) to geocode a location string to lat/lon."""
+    url = "https://nominatim.openstreetmap.org/search"
+    params = {
+        "q": location + ", Brasil",
+        "format": "json",
+        "limit": 1,
+        "countrycodes": "br",
+    }
+    headers = {
+        "User-Agent": "ProspectAutomator/1.0 (prospect-app)",
+        "Accept-Language": "pt-BR",
+    }
+
+    resp = requests.get(url, params=params, headers=headers, timeout=15)
+    resp.raise_for_status()
+    data = resp.json()
+
+    if not data:
+        return None, None
+
+    return float(data[0]["lat"]), float(data[0]["lon"])
+
+
+def map_segment_to_osm_tags(segment: str):
+    """
+    Map a business segment search term to OpenStreetMap tags.
+    Returns a list of (key, value) tuples for Overpass queries.
+    """
+    segment_lower = segment.lower().strip()
+
+    # Common mapping of Brazilian business types to OSM tags
+    mappings = {
+        "clinica": [("amenity", "clinic"), ("amenity", "doctors"), ("healthcare", "clinic")],
+        "clínica": [("amenity", "clinic"), ("amenity", "doctors"), ("healthcare", "clinic")],
+        "odontolog": [("amenity", "dentist"), ("healthcare", "dentist")],
+        "dentista": [("amenity", "dentist"), ("healthcare", "dentist")],
+        "restaurante": [("amenity", "restaurant")],
+        "lanchonete": [("amenity", "fast_food")],
+        "padaria": [("shop", "bakery")],
+        "farmacia": [("amenity", "pharmacy"), ("shop", "chemist")],
+        "farmácia": [("amenity", "pharmacy"), ("shop", "chemist")],
+        "academia": [("leisure", "fitness_centre"), ("amenity", "gym")],
+        "pet": [("shop", "pet"), ("amenity", "veterinary")],
+        "veterinar": [("amenity", "veterinary")],
+        "mercado": [("shop", "supermarket"), ("shop", "convenience")],
+        "supermercado": [("shop", "supermarket")],
+        "loja": [("shop", "yes")],
+        "roupa": [("shop", "clothes")],
+        "salao": [("shop", "hairdresser"), ("shop", "beauty")],
+        "salão": [("shop", "hairdresser"), ("shop", "beauty")],
+        "beleza": [("shop", "beauty"), ("shop", "hairdresser")],
+        "barbearia": [("shop", "hairdresser")],
+        "escola": [("amenity", "school")],
+        "hotel": [("tourism", "hotel")],
+        "pousada": [("tourism", "guest_house")],
+        "hospital": [("amenity", "hospital")],
+        "oficina": [("shop", "car_repair")],
+        "mecanica": [("shop", "car_repair")],
+        "mecânica": [("shop", "car_repair")],
+        "lava": [("shop", "car_wash"), ("amenity", "car_wash")],
+        "advogado": [("office", "lawyer")],
+        "advocacia": [("office", "lawyer")],
+        "contabil": [("office", "accountant")],
+        "contábil": [("office", "accountant")],
+        "imobiliaria": [("office", "estate_agent")],
+        "imobiliária": [("office", "estate_agent")],
+        "constru": [("shop", "hardware"), ("shop", "doityourself")],
+        "material": [("shop", "hardware"), ("shop", "doityourself")],
+        "posto": [("amenity", "fuel")],
+        "combustivel": [("amenity", "fuel")],
+        "bar": [("amenity", "bar"), ("amenity", "pub")],
+        "cafe": [("amenity", "cafe")],
+        "café": [("amenity", "cafe")],
+        "otica": [("shop", "optician")],
+        "ótica": [("shop", "optician")],
+        "floricultura": [("shop", "florist")],
+        "papelaria": [("shop", "stationery")],
+        "livraria": [("shop", "books")],
+        "eletro": [("shop", "electronics")],
+        "celular": [("shop", "mobile_phone")],
+        "informatica": [("shop", "computer")],
+        "informática": [("shop", "computer")],
+        "joalheria": [("shop", "jewelry")],
+        "relojoaria": [("shop", "watches")],
+    }
+
+    # Find matching tags
+    tags = []
+    for keyword, tag_list in mappings.items():
+        if keyword in segment_lower:
+            tags.extend(tag_list)
+
+    # If no specific mapping found, do a generic search
+    if not tags:
+        tags = [
+            ("shop", ""),      # Any shop
+            ("amenity", ""),   # Any amenity
+            ("office", ""),    # Any office
+        ]
+
+    return tags
+
+
+def query_overpass(lat: float, lon: float, radius_m: int, tags: list, segment: str):
+    """
+    Query the Overpass API for businesses matching the given OSM tags
+    within the specified radius.
+    """
+    # Build Overpass QL query
+    # We search for nodes and ways with the specified tags
+    tag_filters = []
+    for key, value in tags:
+        if value:
+            tag_filters.append(f'node["{key}"="{value}"](around:{radius_m},{lat},{lon});')
+            tag_filters.append(f'way["{key}"="{value}"](around:{radius_m},{lat},{lon});')
+        else:
+            tag_filters.append(f'node["{key}"](around:{radius_m},{lat},{lon});')
+            tag_filters.append(f'way["{key}"](around:{radius_m},{lat},{lon});')
+
+    tag_query = "\n    ".join(tag_filters)
+
+    query = f"""
+    [out:json][timeout:30];
+    (
+    {tag_query}
+    );
+    out body center 100;
+    """
+
+    url = "https://overpass-api.de/api/interpreter"
+    resp = requests.post(url, data={"data": query}, timeout=45)
+    resp.raise_for_status()
+    data = resp.json()
+
+    elements = data.get("elements", [])
+    print(f"Overpass retornou {len(elements)} elementos.")
+
+    results = []
+    for i, el in enumerate(elements):
+        tags_data = el.get("tags", {})
+        name = tags_data.get("name", "")
+
+        if not name or len(name) < 2:
+            continue
+
+        # Filter: if segment has a specific keyword, check the name is relevant
+        # (skip entries that clearly don't match)
+
+        phone = (
+            tags_data.get("phone", "") or
+            tags_data.get("contact:phone", "") or
+            tags_data.get("contact:mobile", "")
+        )
+
+        # Build address from OSM tags
+        addr_parts = []
+        street = tags_data.get("addr:street", "")
+        number = tags_data.get("addr:housenumber", "")
+        city = tags_data.get("addr:city", "")
+        suburb = tags_data.get("addr:suburb", "")
+
+        if street:
+            addr_parts.append(f"{street}{', ' + number if number else ''}")
+        if suburb:
+            addr_parts.append(suburb)
+        if city:
+            addr_parts.append(city)
+
+        address = " - ".join(addr_parts) if addr_parts else ""
+
+        results.append({
+            "id": len(results) + 1,
+            "companyName": name,
+            "phone": phone,
+            "address": address,
+        })
+
+        if len(results) >= 100:
+            break
+
+    return results
 
 
 @app.post("/api/prospects")
@@ -157,9 +253,12 @@ def generate_prospects(params: SearchParams):
     except Exception as e:
         error_msg = traceback.format_exc()
         print("Scraper Error:\n", error_msg)
-        return JSONResponse(status_code=500, content={"detail": str(e), "traceback": error_msg})
+        return JSONResponse(
+            status_code=500,
+            content={"detail": str(e), "traceback": error_msg}
+        )
 
 
 @app.get("/api/health")
 def health_check():
-    return {"status": "ok", "api_key_configured": bool(GOOGLE_API_KEY)}
+    return {"status": "ok"}
