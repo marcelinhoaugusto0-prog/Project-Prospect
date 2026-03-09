@@ -320,7 +320,24 @@ function App() {
             <div className="debug-label">
               <Bug size={16} /> PAINEL DE DEBUG DO SISTEMA
             </div>
-            <pre style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
+
+            {debugInfo?.data?.log && (
+              <div style={{ marginBottom: '1.5rem', borderBottom: '1px solid rgba(16, 185, 129, 0.3)', paddingBottom: '1rem' }}>
+                <div style={{ color: '#10b981', fontWeight: 'bold', marginBottom: '0.5rem', fontSize: '0.8rem' }}>
+                  {">"} LOG DE EXECUÇÃO (BACKEND):
+                </div>
+                {debugInfo.data.log.map((line, i) => (
+                  <div key={i} style={{ marginBottom: '2px', opacity: line.includes('❌') ? 0.6 : 1 }}>
+                    {line}
+                  </div>
+                ))}
+              </div>
+            )}
+
+            <div style={{ color: '#10b981', fontWeight: 'bold', marginBottom: '0.5rem', fontSize: '0.8rem' }}>
+              {">"} RAW API DATA:
+            </div>
+            <pre style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-all', opacity: 0.8 }}>
               {debugInfo ? JSON.stringify(debugInfo, null, 2) : "Nenhuma atividade recente registrada no debug."}
             </pre>
             <div style={{ marginTop: '1rem', opacity: 0.5, fontSize: '0.7rem' }}>

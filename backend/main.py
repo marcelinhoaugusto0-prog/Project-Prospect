@@ -370,132 +370,102 @@ def search_instagram_hashtag(hashtag: str):
     Search Instagram by hashtag and analyze bios for contact info.
     Only returns profiles that have a phone number or website in their bio.
     """
+    execution_log = []
+    def log(msg):
+        print(f"[IG] {msg}")
+        execution_log.append(f"{time.strftime('%H:%M:%S')} - {msg}")
+
     if not INSTAGRAM_ACCESS_TOKEN or not INSTAGRAM_ACCOUNT_ID:
-        raise ValueError(
-            "Instagram não configurado. Adicione INSTAGRAM_ACCESS_TOKEN e "
-            "INSTAGRAM_ACCOUNT_ID como variáveis de ambiente no Vercel."
-        )
+        raise ValueError("Instagram não configurado nas variáveis de ambiente.")
 
-    # Clean hashtag (remove # if present)
     clean_tag = hashtag.strip().replace("#", "").replace(" ", "")
-    print(f"[IG] Buscando hashtag: #{clean_tag}")
+    log(f"Iniciando busca pela hashtag: #{clean_tag}")
 
-    # Step 1: Get hashtag ID
-    data = ig_api_get("ig_hashtag_search", {
-        "q": clean_tag,
-        "user_id": INSTAGRAM_ACCOUNT_ID,
-    })
-    hashtag_results = data.get("data", [])
-    if not hashtag_results:
-        raise ValueError(f"Hashtag #{clean_tag} não encontrada.")
-
-    hashtag_id = hashtag_results[0]["id"]
-    print(f"[IG] Hashtag ID: {hashtag_id}")
-
-    # Step 2: Get recent media for this hashtag
-    media_data = ig_api_get(f"{hashtag_id}/recent_media", {
-        "user_id": INSTAGRAM_ACCOUNT_ID,
-        "fields": "id,caption,permalink",
-    })
-    media_list = media_data.get("data", [])
-    print(f"[IG] Posts encontrados: {len(media_list)}")
-
-    # Also try top media
+    results = []
     try:
-        top_media = ig_api_get(f"{hashtag_id}/top_media", {
+        # Step 1: Get hashtag ID
+        data = ig_api_get("ig_hashtag_search", {"q": clean_tag, "user_id": INSTAGRAM_ACCOUNT_ID})
+        hashtag_results = data.get("data", [])
+        if not hashtag_results:
+            log(f"Hashtag #{clean_tag} não encontrada.")
+            return [], execution_log
+
+        hashtag_id = hashtag_results[0]["id"]
+        log(f"Hashtag ID encontrado: {hashtag_id}")
+
+        # Step 2: Get recent media
+        media_data = ig_api_get(f"{hashtag_id}/recent_media", {
             "user_id": INSTAGRAM_ACCOUNT_ID,
             "fields": "id,caption,permalink",
         })
-        top_list = top_media.get("data", [])
-        print(f"[IG] Top posts: {len(top_list)}")
-        # Combine, avoiding duplicates
-        seen_ids = {m["id"] for m in media_list}
-        for m in top_list:
-            if m["id"] not in seen_ids:
-                media_list.append(m)
-                seen_ids.add(m["id"])
+        media_list = media_data.get("data", [])
+        log(f"Recent posts encontrados: {len(media_list)}")
+
+        if not media_list:
+            log("Nenhum post recente encontrado para esta hashtag. (Dica: Se o app estiver em modo 'Development', a API só vê posts de apps de teste).")
+
+        seen_usernames = set()
+        for media in media_list:
+            caption = media.get("caption", "") or ""
+            
+            try:
+                media_details = ig_api_get(media["id"], {"fields": "username"})
+                username = media_details.get("username", "")
+            except:
+                username = ""
+
+            if not username or username in seen_usernames:
+                continue
+            seen_usernames.add(username)
+            log(f"Analisando perfil: @{username}")
+
+            bio = ""
+            website = ""
+            name = username
+            try:
+                user_data = ig_api_get(INSTAGRAM_ACCOUNT_ID, {
+                    "fields": "business_discovery.fields(username,name,biography,website){" + username + "}",
+                })
+                discovery = user_data.get("business_discovery", {})
+                bio = discovery.get("biography", "") or ""
+                website = discovery.get("website", "") or ""
+                name = discovery.get("name", username) or username
+            except Exception as e:
+                log(f"   Aviso: Falha na business_discovery para @{username}. Analisando legenda em vez da bio.")
+                bio = caption
+
+            all_text = f"{bio} {caption}"
+            phones = extract_phones_from_text(all_text)
+            urls = extract_urls_from_text(bio) if not website else [website]
+
+            if phones or urls or website:
+                log(f"   ✅ Contato encontrado: {phones[0] if phones else (urls[0] if urls else 'Site')}")
+                results.append({
+                    "id": len(results) + 1,
+                    "username": f"@{username}",
+                    "profileLink": f"https://instagram.com/{username}",
+                    "name": name,
+                    "bio": bio[:200],
+                    "phone": phones[0] if phones else "",
+                    "website": website or (urls[0] if urls else ""),
+                })
+            else:
+                log(f"   ❌ Nenhum telefone ou site detectado na bio/legenda.")
+
+        log(f"Busca finalizada. {len(results)} prospects qualificados encontrados.")
+        return results, execution_log
+
     except Exception as e:
-        print(f"[IG] Top media erro (ignorando): {e}")
-
-    # Step 3: For each post, analyze caption for contact info
-    # Also collect unique usernames to try to get profiles
-    results = []
-    seen_usernames = set()
-
-    for media in media_list:
-        caption = media.get("caption", "") or ""
-        permalink = media.get("permalink", "")
-
-        # Extract username from permalink: https://www.instagram.com/p/XXXX/
-        # We need to get the business user from the media
-        try:
-            media_details = ig_api_get(media["id"], {
-                "fields": "username,owner",
-            })
-            username = media_details.get("username", "")
-        except Exception:
-            # Try to extract from permalink or skip
-            username = ""
-
-        if not username:
-            continue
-
-        if username in seen_usernames:
-            continue
-        seen_usernames.add(username)
-
-        # Try to get user profile details
-        bio = ""
-        website = ""
-        name = username
-        try:
-            # Note: We can only get detailed info for business accounts
-            # For others, we use the caption as a source
-            user_data = ig_api_get(INSTAGRAM_ACCOUNT_ID, {
-                "fields": "business_discovery.fields(username,name,biography,website,profile_picture_url,followers_count){" + username + "}",
-            })
-            discovery = user_data.get("business_discovery", {})
-            bio = discovery.get("biography", "") or ""
-            website = discovery.get("website", "") or ""
-            name = discovery.get("name", username) or username
-        except Exception:
-            # If business_discovery fails, analyze the caption instead
-            bio = caption
-
-        # Step 4: BIO ANALYSIS BOT
-        # Extract phones and URLs from bio + caption
-        all_text = f"{bio} {caption}"
-        phones = extract_phones_from_text(all_text)
-        urls = extract_urls_from_text(bio) if not website else [website]
-
-        # Only include if we found contact info (phone OR website)
-        if phones or urls or website:
-            profile_link = f"https://instagram.com/{username}"
-            results.append({
-                "id": len(results) + 1,
-                "username": f"@{username}",
-                "profileLink": profile_link,
-                "name": name,
-                "bio": bio[:200] if bio else "",  # Truncate long bios
-                "phone": phones[0] if phones else "",
-                "website": website or (urls[0] if urls else ""),
-            })
-            print(f"[IG] ✅ @{username} — phone: {phones[0] if phones else 'N/A'}, site: {website or (urls[0] if urls else 'N/A')}")
-        else:
-            print(f"[IG] ❌ @{username} — sem contato na bio")
-
-    print(f"[IG] Total com contato: {len(results)} de {len(seen_usernames)} perfis")
-    return results
+        log(f"Erro crítico: {str(e)}")
+        raise e
 
 
 @app.post("/api/instagram-prospects")
 def instagram_prospects(params: InstagramSearchParams):
     try:
-        results = search_instagram_hashtag(params.hashtag)
-        return {"status": "success", "data": results}
+        results, log_data = search_instagram_hashtag(params.hashtag)
+        return {"status": "success", "data": results, "log": log_data}
     except ValueError as e:
         return JSONResponse(status_code=400, content={"detail": str(e)})
     except Exception as e:
-        error_msg = traceback.format_exc()
-        print("Instagram Error:\n", error_msg)
         return JSONResponse(status_code=500, content={"detail": str(e)})
