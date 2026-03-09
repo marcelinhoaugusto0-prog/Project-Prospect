@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-import asyncio
+
 from scraper import scrape_prospects
 
 app = FastAPI(title="Prospects API")
