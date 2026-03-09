@@ -3,9 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 import requests
-import re
-import json
-import urllib.parse
+import os
 import traceback
 
 app = FastAPI(title="Prospects API")
@@ -18,6 +16,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Google Places API Key - set as environment variable in Vercel
+GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY", "")
+
+
 class SearchParams(BaseModel):
     segment: str
     location: str
@@ -26,38 +28,111 @@ class SearchParams(BaseModel):
 
 def scrape_prospects(segment: str, location: str, radius: int):
     """
-    Scrapes business prospects from Google Maps using HTTP requests.
-    Works in serverless environments (no browser needed).
+    Fetches business prospects using Google Places API (Text Search).
+    Returns structured business data with name, phone, and address.
     """
     search_query = f"{segment} em {location}"
-    print(f"Buscando por: {search_query} (Raio estimado: {radius}km)")
+    print(f"Buscando por: {search_query} (Raio: {radius}km)")
+
+    if not GOOGLE_API_KEY:
+        raise ValueError(
+            "GOOGLE_API_KEY não configurada. "
+            "Configure a variável de ambiente no Vercel Dashboard."
+        )
 
     results = []
 
     try:
-        encoded_query = urllib.parse.quote(search_query)
-        url = f"https://www.google.com/maps/search/{encoded_query}"
+        # Step 1: Use Text Search to find businesses
+        text_search_url = "https://places.googleapis.com/v1/places:searchText"
 
         headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Content-Type": "application/json",
+            "X-Goog-Api-Key": GOOGLE_API_KEY,
+            "X-Goog-FieldMask": (
+                "places.displayName,"
+                "places.formattedAddress,"
+                "places.nationalPhoneNumber,"
+                "places.internationalPhoneNumber,"
+                "places.websiteUri,"
+                "places.id"
+            ),
         }
 
-        response = requests.get(url, headers=headers, timeout=30)
-        response.raise_for_status()
-        html = response.text
+        payload = {
+            "textQuery": search_query,
+            "languageCode": "pt-BR",
+            "maxResultCount": 20,
+        }
 
-        # Extract business data from the HTML
-        results = _extract_from_html(html, location)
+        # If radius is specified, we can add location bias
+        # but for text search, the location is already in the query
+        if radius and radius > 0:
+            payload["maxResultCount"] = min(20, 20)  # API max is 20 per request
 
-        if len(results) < 3:
-            print("Poucos resultados do HTML. Tentando abordagem alternativa...")
-            results = _extract_from_maps_api(search_query, location)
+        response = requests.post(text_search_url, json=payload, headers=headers, timeout=30)
 
+        if response.status_code != 200:
+            error_detail = response.text
+            print(f"Google Places API Error ({response.status_code}): {error_detail}")
+            raise Exception(f"Google Places API retornou erro {response.status_code}: {error_detail}")
+
+        data = response.json()
+        places = data.get("places", [])
+
+        print(f"Google Places retornou {len(places)} resultados.")
+
+        # If we need more results, paginate
+        all_places = list(places)
+
+        # For getting more results, we can make additional requests with page tokens
+        # The new API supports pagination via nextPageToken
+        # Let's make up to 5 requests to get ~100 results
+        page_count = 1
+        max_pages = 5  # 5 pages * 20 = up to 100 results
+
+        while page_count < max_pages and len(all_places) < 100:
+            # For the new Places API, we use pageToken
+            next_page_token = data.get("nextPageToken")
+            if not next_page_token:
+                break
+
+            payload["pageToken"] = next_page_token
+            response = requests.post(text_search_url, json=payload, headers=headers, timeout=30)
+
+            if response.status_code != 200:
+                break
+
+            data = response.json()
+            new_places = data.get("places", [])
+            if not new_places:
+                break
+
+            all_places.extend(new_places)
+            page_count += 1
+            print(f"Página {page_count}: +{len(new_places)} resultados (total: {len(all_places)})")
+
+        # Step 2: Format results
+        for i, place in enumerate(all_places):
+            display_name = place.get("displayName", {})
+            name = display_name.get("text", "Sem nome") if isinstance(display_name, dict) else str(display_name)
+
+            phone = place.get("nationalPhoneNumber", "") or place.get("internationalPhoneNumber", "")
+            address = place.get("formattedAddress", location)
+
+            results.append({
+                "id": i + 1,
+                "companyName": name,
+                "phone": phone,
+                "address": address,
+            })
+
+    except ValueError:
+        raise  # Re-raise API key errors
     except Exception as e:
-        print(f"Erro durante a raspagem: {e}")
+        print(f"Erro durante a busca: {e}")
         traceback.print_exc()
+        raise
 
     # Deduplicate based on company name
     unique_results = []
@@ -68,97 +143,8 @@ def scrape_prospects(segment: str, location: str, radius: int):
             seen.add(name_lower)
             unique_results.append(row)
 
-    print(f"Raspagem finalizada. {len(unique_results)} encontrados.")
+    print(f"Busca finalizada. {len(unique_results)} resultados únicos encontrados.")
     return unique_results
-
-
-def _extract_from_html(html: str, location: str):
-    """Extract business data from Google Maps HTML response."""
-    results = []
-
-    aria_labels = re.findall(r'aria-label="([^"]{3,80})"', html)
-    phone_numbers = re.findall(r'\(?\d{2}\)?\s*\d{4,5}[-\s]?\d{4}', html)
-    addresses = re.findall(
-        r'(?:R\.|Rua|Av\.|Avenida|Al\.|Alameda|Pça\.|Praça|Trav\.|Travessa)[^"<]{5,80}',
-        html
-    )
-
-    data_blocks = re.findall(r'\["0x[0-9a-f]+:[0-9a-f]+","([^"]+)"', html)
-
-    business_names = []
-    for name in data_blocks:
-        if len(name) > 2 and not name.startswith('http') and not name.startswith('/'):
-            business_names.append(name)
-
-    if len(business_names) < 5:
-        for label in aria_labels:
-            if (len(label) > 3 and
-                not label.startswith('http') and
-                'Google' not in label and
-                'Maps' not in label and
-                'Pesquisar' not in label):
-                business_names.append(label)
-
-    for i, name in enumerate(business_names[:100]):
-        phone = phone_numbers[i] if i < len(phone_numbers) else ""
-        address = addresses[i] if i < len(addresses) else location
-
-        results.append({
-            "id": i + 1,
-            "companyName": name,
-            "phone": phone,
-            "address": address
-        })
-
-    return results
-
-
-def _extract_from_maps_api(search_query: str, location: str):
-    """Alternative extraction using Google Maps search."""
-    results = []
-
-    try:
-        encoded = urllib.parse.quote(search_query)
-        url = f"https://www.google.com/maps/search/{encoded}/"
-
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept-Language": "pt-BR,pt;q=0.9",
-            "Accept": "text/html,application/xhtml+xml",
-            "Referer": "https://www.google.com/",
-        }
-
-        session = requests.Session()
-        resp = session.get(url, headers=headers, timeout=30, allow_redirects=True)
-        text = resp.text
-
-        entries = re.findall(
-            r'\\\"([^\\\"]{4,60})\\\"[^}]*?\\\"(\(?\d{2}\)?\s*\d{4,5}[-\s]?\d{4})\\\"',
-            text
-        )
-
-        for i, (name, phone) in enumerate(entries[:100]):
-            results.append({
-                "id": i + 1,
-                "companyName": name,
-                "phone": phone,
-                "address": location
-            })
-
-        if not results:
-            names = re.findall(r'"([^"]{4,60})",null,null,null,null,null,null,null,"[^"]*(?:R\.|Rua|Av\.|Avenida)', text)
-            for i, name in enumerate(names[:100]):
-                results.append({
-                    "id": i + 1,
-                    "companyName": name,
-                    "phone": "",
-                    "address": location
-                })
-
-    except Exception as e:
-        print(f"Erro na API alternativa: {e}")
-
-    return results
 
 
 @app.post("/api/prospects")
@@ -166,11 +152,14 @@ def generate_prospects(params: SearchParams):
     try:
         results = scrape_prospects(params.segment, params.location, params.radius)
         return {"status": "success", "data": results}
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"detail": str(e)})
     except Exception as e:
         error_msg = traceback.format_exc()
         print("Scraper Error:\n", error_msg)
         return JSONResponse(status_code=500, content={"detail": str(e), "traceback": error_msg})
 
+
 @app.get("/api/health")
 def health_check():
-    return {"status": "ok"}
+    return {"status": "ok", "api_key_configured": bool(GOOGLE_API_KEY)}

@@ -26,7 +26,9 @@ function App() {
       });
 
       if (!response.ok) {
-        throw new Error('Falha na comunicação com o servidor de automação.');
+        const errorData = await response.json().catch(() => null);
+        const detail = errorData?.detail || 'Falha na comunicação com o servidor de automação.';
+        throw new Error(detail);
       }
 
       const data = await response.json();
