@@ -8,10 +8,10 @@ import time
 import re
 import os
 
-# Instagram Graph API credentials
-INSTAGRAM_ACCESS_TOKEN = os.environ.get("INSTAGRAM_ACCESS_TOKEN", "")
-INSTAGRAM_ACCOUNT_ID = os.environ.get("INSTAGRAM_ACCOUNT_ID", "")
-GRAPH_API_BASE = "https://graph.facebook.com/v25.0"
+# Instagram Graph API credentials (loaded from Vercel Env Vars)
+INSTAGRAM_ACCESS_TOKEN = os.environ.get("INSTAGRAM_ACCESS_TOKEN", "").strip()
+INSTAGRAM_ACCOUNT_ID = os.environ.get("INSTAGRAM_ACCOUNT_ID", "").strip()
+GRAPH_API_BASE = "https://graph.facebook.com/v25.0" # Updated v25.0
 
 app = FastAPI(title="Prospects API")
 
