@@ -396,28 +396,36 @@ def search_instagram_hashtag(hashtag: str):
         # Step 2: Get recent media
         media_data = ig_api_get(f"{hashtag_id}/recent_media", {
             "user_id": INSTAGRAM_ACCOUNT_ID,
-            "fields": "id,caption,permalink",
+            "fields": "id,caption,permalink,media_type",
         })
         media_list = media_data.get("data", [])
         log(f"Recent posts encontrados: {len(media_list)}")
 
-        if not media_list:
-            log("Nenhum post recente encontrado para esta hashtag. (Dica: Se o app estiver em modo 'Development', a API só vê posts de apps de teste).")
+        if media_list:
+            log(f"DEBUG: Dados do primeiro post: {str(media_list[0])[:500]}")
 
         seen_usernames = set()
-        for media in media_list:
+        for i, media in enumerate(media_list):
             caption = media.get("caption", "") or ""
+            username = ""
             
             try:
+                # Tentativa de pegar o username via media_id
                 media_details = ig_api_get(media["id"], {"fields": "username"})
                 username = media_details.get("username", "")
-            except:
-                username = ""
+            except Exception as e:
+                if i == 0:
+                    log(f"DEBUG: Falha ao pegar username do post {media['id']}: {str(e)}")
 
-            if not username or username in seen_usernames:
+            if not username:
+                # Se não tem username, tentamos extrair contato da legenda pelo menos para logar
+                phones = extract_phones_from_text(caption)
+                if phones and i < 5:
+                    log(f"Aviso: Encontrei telefone na legenda de um post sem username: {phones[0]}")
                 continue
-            seen_usernames.add(username)
-            log(f"Analisando perfil: @{username}")
+
+            if username in seen_usernames:
+                continue
 
             bio = ""
             website = ""
