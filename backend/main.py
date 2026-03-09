@@ -393,72 +393,106 @@ def search_instagram_hashtag(hashtag: str):
         hashtag_id = hashtag_results[0]["id"]
         log(f"Hashtag ID encontrado: {hashtag_id}")
 
-        # Step 2: Get recent media
-        media_data = ig_api_get(f"{hashtag_id}/recent_media", {
-            "user_id": INSTAGRAM_ACCOUNT_ID,
-            "fields": "id,caption,permalink,media_type",
-        })
-        media_list = media_data.get("data", [])
-        log(f"Recent posts encontrados: {len(media_list)}")
+        # Step 2: Get media (Recent and Top if possible)
+        all_media = []
+        
+        # Recent
+        try:
+            recent_data = ig_api_get(f"{hashtag_id}/recent_media", {
+                "user_id": INSTAGRAM_ACCOUNT_ID,
+                "fields": "id,caption,permalink,media_type",
+            })
+            all_media.extend(recent_data.get("data", []))
+            log(f"Recent posts encontrados: {len(recent_data.get('data', []))}")
+        except Exception as e:
+            log(f"Aviso: Erro ao buscar recent_media: {e}")
 
-        if media_list:
-            log(f"DEBUG: Dados do primeiro post: {str(media_list[0])[:500]}")
-
-        seen_usernames = set()
-        for i, media in enumerate(media_list):
-            caption = media.get("caption", "") or ""
-            username = ""
+        # Top (Best for quality)
+        try:
+            top_data = ig_api_get(f"{hashtag_id}/top_media", {
+                "user_id": INSTAGRAM_ACCOUNT_ID,
+                "fields": "id,caption,permalink,media_type",
+            })
+            top_list = top_data.get("data", [])
+            log(f"Top posts encontrados: {len(top_list)}")
             
+            seen_ids = {m["id"] for m in all_media}
+            for m in top_list:
+                if m["id"] not in seen_ids:
+                    all_media.append(m)
+        except Exception as e:
+            log(f"Aviso: Erro ao buscar top_media: {e}")
+
+        if not all_media:
+            log("Nenhum post (recente ou top) encontrado para esta hashtag.")
+            return [], execution_log
+
+        seen_links = set()
+        for i, media in enumerate(all_media):
+            caption = media.get("caption", "") or ""
+            permalink = media.get("permalink", "")
+            
+            if permalink in seen_links:
+                continue
+            seen_links.add(permalink)
+
+            username = "Perfil do Post"
+            profile_link = permalink
+            
+            # Tenta pegar o username (Meta costuma bloquear em hashtags, mas tentamos)
             try:
-                # Tentativa de pegar o username via media_id
                 media_details = ig_api_get(media["id"], {"fields": "username"})
-                username = media_details.get("username", "")
-            except Exception as e:
-                if i == 0:
-                    log(f"DEBUG: Falha ao pegar username do post {media['id']}: {str(e)}")
+                username = media_details.get("username", "Perfil do Post")
+                if username != "Perfil do Post":
+                    profile_link = f"https://instagram.com/{username}"
+            except:
+                # Se falhar o username direto, tenta achar @menção na legenda
+                mentions = re.findall(r"@([a-zA-Z0-9_.]+)", caption)
+                if mentions:
+                    username = f"@{mentions[0]} (provável)"
+                    profile_link = f"https://instagram.com/{mentions[0]}"
 
-            if not username:
-                # Se não tem username, tentamos extrair contato da legenda pelo menos para logar
-                phones = extract_phones_from_text(caption)
-                if phones and i < 5:
-                    log(f"Aviso: Encontrei telefone na legenda de um post sem username: {phones[0]}")
-                continue
+            # Análise de contatos na LEGENDA (já que a bio pode estar inacessível)
+            phones = extract_phones_from_text(caption)
+            urls = extract_urls_from_text(caption)
 
-            if username in seen_usernames:
-                continue
-
+            # Tenta Business Discovery APENAS se tivermos um username limpo
             bio = ""
             website = ""
-            name = username
-            try:
-                user_data = ig_api_get(INSTAGRAM_ACCOUNT_ID, {
-                    "fields": "business_discovery.fields(username,name,biography,website){" + username + "}",
-                })
-                discovery = user_data.get("business_discovery", {})
-                bio = discovery.get("biography", "") or ""
-                website = discovery.get("website", "") or ""
-                name = discovery.get("name", username) or username
-            except Exception as e:
-                log(f"   Aviso: Falha na business_discovery para @{username}. Analisando legenda em vez da bio.")
-                bio = caption
+            name = ""
+            clean_username = username.replace("@", "").split(" ")[0]
+            if clean_username and "Perfil" not in clean_username:
+                try:
+                    user_data = ig_api_get(INSTAGRAM_ACCOUNT_ID, {
+                        "fields": f"business_discovery.fields(username,name,biography,website){{{clean_username}}}",
+                    })
+                    discovery = user_data.get("business_discovery", {})
+                    bio = discovery.get("biography", "") or ""
+                    website = discovery.get("website", "") or ""
+                    name = discovery.get("name", "")
+                    
+                    # Se achou bio/site na discovery, extrai deles também
+                    discovery_phones = extract_phones_from_text(bio)
+                    if discovery_phones: phones.extend(discovery_phones)
+                    if website: urls.append(website)
+                except:
+                    pass
 
-            all_text = f"{bio} {caption}"
-            phones = extract_phones_from_text(all_text)
-            urls = extract_urls_from_text(bio) if not website else [website]
-
+            # Filtro FINAL: Só adiciona se tiver Telefone ou Site
             if phones or urls or website:
-                log(f"   ✅ Contato encontrado: {phones[0] if phones else (urls[0] if urls else 'Site')}")
+                log(f"   ✅ Lead encontrado! {username}")
                 results.append({
                     "id": len(results) + 1,
-                    "username": f"@{username}",
-                    "profileLink": f"https://instagram.com/{username}",
-                    "name": name,
-                    "bio": bio[:200],
+                    "username": username if username.startswith("@") else f"@{username}",
+                    "profileLink": profile_link,
+                    "name": name or username.replace("@", ""),
+                    "bio": (bio or caption)[:200],
                     "phone": phones[0] if phones else "",
                     "website": website or (urls[0] if urls else ""),
                 })
             else:
-                log(f"   ❌ Nenhum telefone ou site detectado na bio/legenda.")
+                # Log opcional para debug se quiser ver quem foi descartado
+                pass
 
         log(f"Busca finalizada. {len(results)} prospects qualificados encontrados.")
         return results, execution_log
