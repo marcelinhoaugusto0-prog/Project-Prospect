@@ -41,11 +41,15 @@ function App() {
   };
 
   const handleExportCSV = () => {
-    const headers = ['Empresa', 'Telefone', 'Endereço'];
+    const headers = ['Empresa', 'Telefone', 'Endereço', 'Site', 'Avaliação', 'Avaliações', 'Categoria'];
     const rows = results.map(r => [
-      r.companyName,
+      `"${(r.companyName || '').replace(/"/g, '""')}"`,
       r.phone || 'Não encontrado',
-      r.address
+      `"${(r.address || '').replace(/"/g, '""')}"`,
+      r.website || '',
+      r.rating || '',
+      r.reviews || '',
+      `"${(r.category || '').replace(/"/g, '""')}"`
     ]);
 
     const csvContent = "data:text/csv;charset=utf-8,"

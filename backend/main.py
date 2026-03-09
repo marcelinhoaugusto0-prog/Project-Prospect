@@ -16,7 +16,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY", "")
+# Outscraper API Key - free tier: 500 records, no credit card needed
+# Get yours at: https://outscraper.com (sign up -> API -> copy key)
+OUTSCRAPER_API_KEY = os.environ.get("OUTSCRAPER_API_KEY", "")
 
 
 class SearchParams(BaseModel):
@@ -27,92 +29,61 @@ class SearchParams(BaseModel):
 
 def scrape_prospects(segment: str, location: str, radius: int):
     """
-    Fetches business prospects using Google Places API (New) - Text Search.
-    Free tier: $200/month credit from Google (covers ~6000+ searches/month).
+    Fetches business prospects using Outscraper Google Maps API.
+    Free tier: 500 records (no credit card required).
+    Returns rich data: name, phone, address, website, rating, reviews.
     """
-    search_query = f"{segment} em {location}"
-    print(f"Buscando por: {search_query} (Raio: {radius}km)")
+    query = f"{segment}, {location}, Brasil"
+    print(f"Buscando via Outscraper: {query}")
 
-    if not GOOGLE_API_KEY:
+    if not OUTSCRAPER_API_KEY:
         raise ValueError(
-            "GOOGLE_API_KEY não configurada. "
-            "Acesse o Vercel Dashboard > Settings > Environment Variables "
-            "e adicione sua chave da Google Places API."
+            "OUTSCRAPER_API_KEY não configurada. "
+            "Crie uma conta gratuita em https://outscraper.com, "
+            "copie sua API key e adicione como variável de ambiente no Vercel."
         )
 
-    all_results = []
+    url = "https://api.outscraper.cloud/google-maps-search"
+    params = {
+        "query": query,
+        "limit": min(100, 100),
+        "async": "false",
+        "language": "pt",
+        "region": "BR",
+    }
+    headers = {
+        "X-API-KEY": OUTSCRAPER_API_KEY,
+    }
 
-    try:
-        # --- Google Places API (New) - Text Search ---
-        url = "https://places.googleapis.com/v1/places:searchText"
+    resp = requests.get(url, params=params, headers=headers, timeout=120)
 
-        headers = {
-            "Content-Type": "application/json",
-            "X-Goog-Api-Key": GOOGLE_API_KEY,
-            "X-Goog-FieldMask": ",".join([
-                "places.displayName",
-                "places.formattedAddress",
-                "places.nationalPhoneNumber",
-                "places.internationalPhoneNumber",
-                "places.websiteUri",
-                "places.id",
-                "nextPageToken",
-            ]),
-        }
+    if resp.status_code == 401:
+        raise ValueError("API key inválida. Verifique sua OUTSCRAPER_API_KEY.")
+    if resp.status_code == 402:
+        raise ValueError("Créditos gratuitos esgotados na Outscraper.")
+    if resp.status_code != 200:
+        raise Exception(f"Outscraper API erro {resp.status_code}: {resp.text}")
 
-        payload = {
-            "textQuery": search_query,
-            "languageCode": "pt-BR",
-            "maxResultCount": 20,
-        }
+    data = resp.json()
 
-        # First request
-        resp = requests.post(url, json=payload, headers=headers, timeout=30)
-        if resp.status_code != 200:
-            error_text = resp.text
-            print(f"Places API error ({resp.status_code}): {error_text}")
-            raise Exception(f"Google Places API erro {resp.status_code}: {error_text}")
+    if data.get("status") != "Success":
+        raise Exception(f"Outscraper retornou status: {data.get('status')}")
 
-        data = resp.json()
-        places = data.get("places", [])
-        all_results.extend(places)
-        print(f"Página 1: {len(places)} resultados")
+    # The API returns data as nested arrays: data -> [batch] -> [places]
+    raw_places = []
+    for batch in data.get("data", []):
+        if isinstance(batch, list):
+            raw_places.extend(batch)
+        elif isinstance(batch, dict):
+            raw_places.append(batch)
 
-        # Paginate to get more results (up to 5 pages = ~100 results)
-        page = 1
-        while page < 5 and len(all_results) < 100:
-            next_token = data.get("nextPageToken")
-            if not next_token:
-                break
-
-            page += 1
-            payload["pageToken"] = next_token
-            resp = requests.post(url, json=payload, headers=headers, timeout=30)
-            if resp.status_code != 200:
-                break
-
-            data = resp.json()
-            new_places = data.get("places", [])
-            if not new_places:
-                break
-
-            all_results.extend(new_places)
-            print(f"Página {page}: +{len(new_places)} resultados (total: {len(all_results)})")
-
-    except ValueError:
-        raise
-    except Exception as e:
-        print(f"Erro na busca: {e}")
-        traceback.print_exc()
-        raise
+    print(f"Outscraper retornou {len(raw_places)} resultados.")
 
     # Format results
-    formatted = []
+    results = []
     seen = set()
-    for i, place in enumerate(all_results):
-        display_name = place.get("displayName", {})
-        name = display_name.get("text", "") if isinstance(display_name, dict) else str(display_name)
-
+    for place in raw_places:
+        name = place.get("name", "")
         if not name or len(name) < 2:
             continue
 
@@ -121,18 +92,28 @@ def scrape_prospects(segment: str, location: str, radius: int):
             continue
         seen.add(name_lower)
 
-        phone = place.get("nationalPhoneNumber", "") or place.get("internationalPhoneNumber", "")
-        address = place.get("formattedAddress", "")
+        phone = place.get("phone", "") or ""
+        address = place.get("address", "") or place.get("full_address", "") or ""
+        website = place.get("website", "") or ""
+        rating = place.get("rating", None)
+        reviews = place.get("reviews", 0) or 0
+        category = place.get("type", "") or place.get("category", "") or ""
+        city = place.get("city", "") or ""
 
-        formatted.append({
-            "id": len(formatted) + 1,
+        results.append({
+            "id": len(results) + 1,
             "companyName": name,
             "phone": phone,
             "address": address,
+            "website": website,
+            "rating": rating,
+            "reviews": reviews,
+            "category": category,
+            "city": city,
         })
 
-    print(f"Busca finalizada. {len(formatted)} resultados únicos.")
-    return formatted
+    print(f"Total: {len(results)} resultados únicos formatados.")
+    return results
 
 
 @app.post("/api/prospects")
@@ -150,4 +131,4 @@ def generate_prospects(params: SearchParams):
 
 @app.get("/api/health")
 def health_check():
-    return {"status": "ok", "api_key_configured": bool(GOOGLE_API_KEY)}
+    return {"status": "ok", "api_key_configured": bool(OUTSCRAPER_API_KEY)}
