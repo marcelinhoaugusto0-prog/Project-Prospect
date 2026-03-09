@@ -332,3 +332,53 @@ p {
     grid-template-columns: 1fr;
   }
 }
+
+/* Progress Bar */
+.progress-container {
+  width: 100%;
+  max-width: 400px;
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 999px;
+  height: 8px;
+  margin: 1rem 0;
+  overflow: hidden;
+  border: 1px solid var(--glass-border);
+}
+
+.progress-bar {
+  height: 100%;
+  background: linear-gradient(90deg, var(--primary-color), #a855f7);
+  transition: width 0.5s cubic-bezier(0.4, 0, 0.2, 1);
+  box-shadow: 0 0 10px rgba(99, 102, 241, 0.5);
+}
+
+.progress-step {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  font-weight: 500;
+  margin-top: 0.5rem;
+}
+
+/* Debug Panel */
+.debug-panel {
+  background: #000;
+  color: #10b981;
+  font-family: 'Fira Code', 'Courier New', monospace;
+  font-size: 0.75rem;
+  padding: 1rem;
+  border-radius: var(--radius-md);
+  border: 1px solid #10b981;
+  max-height: 200px;
+  overflow-y: auto;
+  margin-top: 1rem;
+  text-align: left;
+}
+
+.debug-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+  margin-bottom: 0.5rem;
+  color: #10b981;
+}

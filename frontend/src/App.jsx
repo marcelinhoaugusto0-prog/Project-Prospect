@@ -1,7 +1,8 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import SearchForm from './components/SearchForm';
 import ResultsTable from './components/ResultsTable';
 import InstagramResults from './components/InstagramResults';
+import { Bug, ChevronDown, ChevronUp, Terminal } from 'lucide-react';
 
 function App() {
   const [searchMode, setSearchMode] = useState('maps'); // 'maps' or 'instagram'
@@ -11,11 +12,54 @@ function App() {
   const [error, setError] = useState(null);
   const [lastSearchedCity, setLastSearchedCity] = useState('');
 
+  // Progress Bar states
+  const [progress, setProgress] = useState(0);
+  const [progressStep, setProgressStep] = useState('');
+
+  // Debug states
+  const [showDebug, setShowDebug] = useState(false);
+  const [debugInfo, setDebugInfo] = useState(null);
+
+  // Progress Simulation Effect
+  useEffect(() => {
+    let interval;
+    if (isLoading) {
+      setProgress(5);
+      const steps = searchMode === 'instagram'
+        ? ['Iniciando bot...', 'Buscando hashtag...', 'Analisando posts...', 'Extraindo bios...', 'Filtrando contatos...']
+        : ['Geolocalizando cidade...', 'Varrendo mapa...', 'Buscando empresas...', 'Formatando endereços...', 'Finalizando...'];
+
+      let stepIdx = 0;
+      setProgressStep(steps[0]);
+
+      interval = setInterval(() => {
+        setProgress(prev => {
+          if (prev < 90) {
+            const next = prev + Math.random() * 10;
+            // Update step text based on progress thresholds
+            const currIdx = Math.min(Math.floor(next / 20), steps.length - 1);
+            if (currIdx > stepIdx) {
+              stepIdx = currIdx;
+              setProgressStep(steps[currIdx]);
+            }
+            return next;
+          }
+          return prev;
+        });
+      }, 2000);
+    } else {
+      setProgress(0);
+      setProgressStep('');
+    }
+    return () => clearInterval(interval);
+  }, [isLoading, searchMode]);
+
   // OpenStreetMap search
   const handleSearch = async ({ segment, location, radius, city }) => {
     setIsLoading(true);
     setError(null);
     setResults([]);
+    setDebugInfo(null);
     if (city) setLastSearchedCity(city);
     else setLastSearchedCity(location || '');
 
@@ -26,13 +70,14 @@ function App() {
         body: JSON.stringify({ segment, location, radius }),
       });
 
+      const data = await response.json();
+      setDebugInfo({ status: response.status, data });
+
       if (!response.ok) {
-        const errorData = await response.json().catch(() => null);
-        const detail = errorData?.detail || 'Falha na comunicação com o servidor.';
+        const detail = data?.detail || 'Falha na comunicação com o servidor.';
         throw new Error(detail);
       }
 
-      const data = await response.json();
       setResults(data.data || []);
     } catch (err) {
       setError(err.message || 'Erro inesperado ao buscar contatos.');
@@ -46,6 +91,7 @@ function App() {
     setIsLoading(true);
     setError(null);
     setIgResults([]);
+    setDebugInfo(null);
 
     try {
       const response = await fetch('/api/instagram-prospects', {
@@ -54,13 +100,14 @@ function App() {
         body: JSON.stringify({ hashtag }),
       });
 
+      const data = await response.json();
+      setDebugInfo({ status: response.status, data });
+
       if (!response.ok) {
-        const errorData = await response.json().catch(() => null);
-        const detail = errorData?.detail || 'Falha na busca do Instagram.';
+        const detail = data?.detail || 'Falha na busca do Instagram.';
         throw new Error(detail);
       }
 
-      const data = await response.json();
       setIgResults(data.data || []);
     } catch (err) {
       setError(err.message || 'Erro inesperado ao buscar no Instagram.');
@@ -71,7 +118,6 @@ function App() {
 
   const handleExportCSV = () => {
     if (searchMode === 'instagram') {
-      // Instagram CSV
       const headers = ['Username', 'Nome', 'Telefone', 'Bio', 'Site', 'Link Perfil'];
       const rows = igResults.map(r => [
         r.username || '',
@@ -90,7 +136,6 @@ function App() {
       link.click();
       document.body.removeChild(link);
     } else {
-      // Maps CSV
       const headers = ['Empresa', 'Telefone', 'Endereço', 'Site', 'Categoria'];
       const rows = results.map(r => [
         `"${(r.companyName || '').replace(/"/g, '""')}"`,
@@ -118,7 +163,6 @@ function App() {
         <h1>Prospect Automator</h1>
         <p>Gere listas de contatos qualificados 100% no automático.</p>
 
-        {/* Tab Toggle */}
         <div style={{
           display: 'flex', gap: '0', marginTop: '1rem',
           background: 'rgba(255,255,255,0.05)', borderRadius: '12px',
@@ -152,7 +196,6 @@ function App() {
       </header>
 
       <main className="dashboard-grid">
-        {/* Sidebar/Search */}
         <div>
           {searchMode === 'maps' ? (
             <SearchForm onSearch={handleSearch} isLoading={isLoading} />
@@ -199,18 +242,35 @@ function App() {
               </form>
             </div>
           )}
+
+          {/* Debug Toggle Button */}
+          <button
+            className="btn-secondary"
+            style={{ marginTop: '1rem', width: '100%', fontSize: '0.75rem', opacity: 0.6 }}
+            onClick={() => setShowDebug(!showDebug)}
+          >
+            <Terminal size={14} />
+            {showDebug ? 'Esconder Debug' : 'Mostrar Painel de Debug'}
+            {showDebug ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+          </button>
         </div>
 
-        {/* Main Content Area */}
         <div>
           {isLoading && (
             <div className="loader-container animate-fade-in" style={{ animationDelay: '0.1s' }}>
               <div className="loader loader-large"></div>
-              <div>
+              <div style={{ width: '100%', display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
                 <h3 style={{ fontSize: '1.25rem', marginBottom: '0.5rem' }}>
                   {searchMode === 'instagram' ? 'Analisando perfis do Instagram...' : 'Buscando Prospects...'}
                 </h3>
-                <p>
+
+                {/* Progress Bar UI */}
+                <div className="progress-container">
+                  <div className="progress-bar" style={{ width: `${progress}%` }}></div>
+                </div>
+                <p className="progress-step">{progressStep}</p>
+
+                <p style={{ marginTop: '1rem' }}>
                   {searchMode === 'instagram'
                     ? 'O bot está analisando bios e extraindo contatos de cada perfil.'
                     : 'Nossa automação está varrendo a região em busca dos melhores contatos.'}
@@ -223,6 +283,13 @@ function App() {
             <div className="glass-panel animate-fade-in" style={{ borderColor: 'rgba(239, 68, 68, 0.5)', backgroundColor: 'rgba(239, 68, 68, 0.1)' }}>
               <h3 style={{ color: '#f87171', marginBottom: '0.5rem' }}>Erro na Automação</h3>
               <p>{error}</p>
+
+              {/* Optional auto-debug info inside error */}
+              <div style={{ marginTop: '1rem', borderTop: '1px solid rgba(239, 68, 68, 0.2)', paddingTop: '1rem' }}>
+                <p style={{ fontSize: '0.75rem', color: '#f87171', opacity: 0.8 }}>
+                  Dica: Verifique o Painel de Debug abaixo para ver o erro bruto da API.
+                </p>
+              </div>
             </div>
           )}
 
@@ -245,6 +312,23 @@ function App() {
           )}
         </div>
       </main>
+
+      {/* Debug Panel Section */}
+      {showDebug && (
+        <section className="animate-fade-in" style={{ marginTop: '3rem' }}>
+          <div className="debug-panel">
+            <div className="debug-label">
+              <Bug size={16} /> PAINEL DE DEBUG DO SISTEMA
+            </div>
+            <pre style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
+              {debugInfo ? JSON.stringify(debugInfo, null, 2) : "Nenhuma atividade recente registrada no debug."}
+            </pre>
+            <div style={{ marginTop: '1rem', opacity: 0.5, fontSize: '0.7rem' }}>
+              Console: {isLoading ? "Executando processo..." : "Aguardando próxima ação."}
+            </div>
+          </div>
+        </section>
+      )}
     </div>
   );
 }
