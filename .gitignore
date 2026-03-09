@@ -22,7 +22,6 @@ api_response.json
 debug_maps.png
 debug_maps.html
 *.png
-*.html
 
 # Project specific
 frontend/node_modules/
